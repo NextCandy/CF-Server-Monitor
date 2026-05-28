@@ -491,38 +491,61 @@ async function getLastAggregatedTo(db) {
 export async function getMetricsHistory(db, serverId, hours, columns) {
   const now = Date.now();
   const cutoff = now - (hours * 60 * 60 * 1000);
-  
+
   const aggColumns = mapColumnsToAggregated(columns);
+
+  // 最近30分钟的数据从原始表读取
   const rawCutoff = now - (0.5 * 60 * 60 * 1000);
-  
+
   let result = [];
-  
-  if (cutoff < rawCutoff) {
-    const rawResult = await db.prepare(`
-      SELECT timestamp, ${columns}
-      FROM metrics_history
-      WHERE server_id = ?
-        AND typeof(timestamp) = 'integer'
-        AND timestamp >= ?
-      ORDER BY timestamp ASC
-    `).bind(serverId, Math.max(cutoff, rawCutoff)).all();
-    
-    const rawData = rawResult.results.map(row => ({
-      ...row,
-      timestamp: typeof row.timestamp === 'string' ? new Date(row.timestamp).getTime() : Number(row.timestamp)
-    }));
-    result = result.concat(rawData);
-  }
-  
+
+  // =========================
+  // 查询最近30分钟原始数据
+  // =========================
+
+  const rawStart = Math.max(cutoff, rawCutoff);
+
+  console.log(
+    '[History]',
+    'server:',
+    serverId,
+    'hours:',
+    hours,
+    'cutoff:',
+    new Date(cutoff).toISOString(),
+    'rawStart:',
+    new Date(rawStart).toISOString()
+  );
+
+  const rawResult = await db.prepare(`
+    SELECT timestamp, ${columns}
+    FROM metrics_history
+    WHERE server_id = ?
+      AND typeof(timestamp) = 'integer'
+      AND timestamp >= ?
+    ORDER BY timestamp ASC
+  `).bind(serverId, rawStart).all();
+
+  const rawData = rawResult.results.map(row => ({
+    ...row,
+    timestamp: Number(row.timestamp)
+  }));
+
+  result = result.concat(rawData);
+
+  // =========================
+  // 查询30分钟以前的聚合数据
+  // =========================
+
   for (const phase of AGGREGATE_PHASES) {
     const phaseStart = now - (phase.maxHours * 60 * 60 * 1000);
     const phaseEnd = now - (phase.minHours * 60 * 60 * 1000);
-    
+
     const queryStart = Math.max(cutoff, phaseStart);
     const queryEnd = Math.min(phaseEnd, rawCutoff);
-    
+
     if (queryStart >= queryEnd) continue;
-    
+
     const aggResult = await db.prepare(`
       SELECT 
         bucket AS timestamp,
@@ -533,18 +556,31 @@ export async function getMetricsHistory(db, serverId, hours, columns) {
         AND bucket >= ?
         AND bucket < ?
       ORDER BY bucket ASC
-    `).bind(serverId, phase.bucketSeconds, queryStart, queryEnd).all();
-    
+    `).bind(
+      serverId,
+      phase.bucketSeconds,
+      queryStart,
+      queryEnd
+    ).all();
+
     const phaseData = aggResult.results.map(row => ({
       ...row,
       timestamp: Number(row.timestamp)
     }));
-    
+
     result = result.concat(phaseData);
   }
-  
+
+  // =========================
+  // 时间排序
+  // =========================
+
   result.sort((a, b) => a.timestamp - b.timestamp);
-  
+
+  console.log(
+    `[History] 返回 ${result.length} 条数据`
+  );
+
   return result;
 }
 
